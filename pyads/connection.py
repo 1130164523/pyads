@@ -36,6 +36,7 @@ from .constants import (
     PLCTYPE_REAL,
     PLCTYPE_SINT,
     PLCTYPE_STRING,
+    PLCTYPE_WSTRING,
     PLCTYPE_TIME,
     PLCTYPE_TOD,
     PLCTYPE_UDINT,
@@ -75,6 +76,7 @@ from .pyads_ex import (
     adsSyncAddDeviceNotificationReqEx,
     adsSyncDelDeviceNotificationReqEx,
     adsSyncSetTimeoutEx,
+    bytes2utf16,
 )
 from .structs import (
     AmsAddr,
@@ -1015,7 +1017,9 @@ class Connection(object):
         if plc_datatype == PLCTYPE_STRING:
             # read only until null-termination character
             value = bytearray(data).split(b"\0", 1)[0].decode("utf-8")
-
+        elif plc_datatype == PLCTYPE_WSTRING:
+            bytes = bytearray(data)
+            value = bytes2utf16(bytes)
         elif plc_datatype is not None and issubclass(plc_datatype, Structure):
             value = plc_datatype()
             fit_size = min(data_size, sizeof(value))

@@ -30,7 +30,6 @@ from .structs import (
 )
 from .constants import (
     PLCTYPE_STRING,
-    PLCTYPE_WSTRING,
     STRING_BUFFER,
     ADSIGRP_SYM_HNDBYNAME,
     PLCTYPE_UDINT,
@@ -45,6 +44,7 @@ from .constants import (
     ADSIGRP_SUMUP_WRITE,
     DATATYPE_MAP,
     ads_type_to_ctype,
+    PLCTYPE_WSTRING,
 )
 from .errorcodes import ERROR_CODES
 
@@ -238,6 +238,11 @@ def type_is_wstring(plc_type: Type) -> bool:
     if plc_type == PLCTYPE_WSTRING:
         return True
 
+    # If char array
+    if type(plc_type).__name__ == "PyCArrayType":
+        if plc_type._type_ == PLCTYPE_WSTRING:
+            return True
+
     return False
 
 
@@ -262,13 +267,8 @@ def get_value_from_ctype_data(read_data: Optional[Any], plc_type: Type) -> Any:
         return read_data.value.decode("utf-8")
 
     if type_is_wstring(plc_type):
-        for ix in range(1, len(read_data), 2):
-            if (read_data[ix - 1], read_data[ix]) == (0, 0):
-                null_idx = ix - 1
-                break
-        else:
-            raise ValueError("No null-terminator found in buffer")
-        return bytearray(read_data[:null_idx]).decode("utf-16-le")
+
+        return read_data.value
 
     if type(plc_type).__name__ == "PyCArrayType":
         return [i for i in read_data]
@@ -622,11 +622,10 @@ def adsSyncWriteReqEx(
         data_length = len(data_pointer.value) + 1  # type: ignore
 
     elif type_is_wstring(plc_data_type):
-        value_bytes = [byte for byte in value.encode("utf-16-le")]
-        data_length = len(value_bytes)  # type: ignore
-        data = (data_length * ctypes.c_uint8)(*value_bytes)
-        data_pointer = ctypes.pointer(data)
-
+        value = value + '\0'
+        data = value.encode("utf_16_le")
+        data_pointer = data  # type: Union[ctypes.c_wchar_p, ctypes.pointer]
+        data_length = len(data_pointer)  # type: ignore
     else:
         if type(plc_data_type).__name__ == "PyCArrayType":
             data = plc_data_type(*value)
@@ -717,7 +716,7 @@ def adsSyncReadWriteReqEx2(
         if type_is_string(read_data_type):
             read_data = (STRING_BUFFER * PLCTYPE_STRING)()
         elif type_is_wstring(read_data_type):
-            read_data = (STRING_BUFFER * ctypes.c_uint8)()
+            read_data = (STRING_BUFFER * PLCTYPE_WSTRING)()
         else:
             read_data = read_data_type()
 
@@ -744,10 +743,12 @@ def adsSyncReadWriteReqEx2(
         # Add an extra byte to the data length for the null terminator
         write_length = len(value) + 1
     elif type_is_wstring(write_data_type):
-        value_bytes = [byte for byte in value.encode("utf-16-le")]
-        write_length = len(value_bytes)  # type: ignore
-        write_data = (write_length * ctypes.c_uint8)(*value_bytes)
-        write_data_pointer = ctypes.pointer(write_data)
+        # # Get pointer to wstring
+
+        # # Add an extra byte to the data length for the null terminator
+        value = value + '\0'
+        write_data_pointer = value.encode("utf_16_le")  # type: Union[ctypes.c_wchar_p, ctypes.pointer]
+        write_length = len(write_data_pointer)  # type: ignore
     else:
         if type(write_data_type).__name__ == "PyCArrayType":
             write_data = write_data_type(*value)
@@ -786,7 +787,8 @@ def adsSyncReadWriteReqEx2(
     # validate that the correct number of bytes were read
     if (
         check_length
-        and not (type_is_string(read_data_type) or type_is_wstring(read_data_type))
+        and not type_is_string(read_data_type)
+        and not type_is_wstring(read_data_type)
         and bytes_read.value != expected_length
     ):
         raise RuntimeError(
@@ -836,7 +838,7 @@ def adsSyncReadReqEx2(
     if type_is_string(data_type):
         data = (STRING_BUFFER * PLCTYPE_STRING)()
     elif type_is_wstring(data_type):
-        data = (STRING_BUFFER * ctypes.c_uint8)()
+        data = (STRING_BUFFER * PLCTYPE_WSTRING)()
     else:
         data = data_type()
 
@@ -863,7 +865,8 @@ def adsSyncReadReqEx2(
     # validate that the correct number of bytes were read
     if (
         check_length
-        and not(type_is_string(data_type) or type_is_wstring(data_type))
+        and not type_is_string(data_type)
+        and not type_is_wstring(data_type)
         and bytes_read.value != data_length.value
     ):
         raise RuntimeError(
@@ -876,6 +879,28 @@ def adsSyncReadReqEx2(
         return data
 
     return get_value_from_ctype_data(data, data_type)
+def FindWstringEnd(bytes):
+    """
+    返回wstring列表中终止符下标号
+    :param bytes: 字节数组
+    :return:
+    """
+    for i in range(0, len(bytes), 2):
+        if bytes[i] == 0 or bytes[i] == b'\x00':
+            return i
+
+
+def bytes2utf16(bytes):
+    """
+    直接数组转utf编码字符
+    :param bytes:字节数组
+    :return:
+    """
+    endindex = FindWstringEnd(bytes)
+
+    bsret = bytes[:endindex]
+
+    return bsret.decode("utf_16_le")
 
 
 def adsGetHandle(port: int, address: AmsAddr, data_name: str) -> int:
@@ -996,29 +1021,46 @@ def adsSumRead(
             result[data_name] = ERROR_CODES[error]
         else:
             if data_name in structured_data_names:
-                value = sum_response[
-                    offset: offset + data_symbols[data_name].size]
-            elif data_symbols[data_name].dataType == ADST_STRING:
-                # find null-terminator 1 Byte
-                null_idx = sum_response[offset: offset + data_symbols[data_name].size].index(0)
-                value = bytearray(sum_response[offset: offset + null_idx]).decode("utf-8")
-            elif data_symbols[data_name].dataType == ADST_WSTRING:
-                # find null-terminator 2 Bytes
-                a = sum_response[offset: offset + data_symbols[data_name].size]
-                for ix in range(1, len(a), 2):
-                    if (a[ix-1], a[ix]) == (0, 0):
-                        null_idx = ix - 1
-                        break
-                else:
-                    raise ValueError("No null-terminator found in buffer")
-                value = bytearray(sum_response[offset: offset + null_idx]).decode("utf-16-le")
-            else:
+                temp = []
+                for item in sum_response[
+                    offset: offset + data_symbols[data_name].size]:
+                    if item < 0:
+                        item += 256
+                    temp.append(item)
+                value =temp
+            elif (
+                data_symbols[data_name].dataType != ADST_STRING
+                and data_symbols[data_name].dataType != ADST_WSTRING
+            ):
                 value = struct.unpack_from(
                     DATATYPE_MAP[ads_type_to_ctype[data_symbols[data_name].dataType]],
                     sum_response,
                     offset=offset,
                 )[0]
+            elif (data_symbols[data_name].dataType == ADST_STRING):
 
+                null_idx = sum_response[
+                           offset: offset + data_symbols[data_name].size
+                           ].index(0)
+                value = bytearray(
+                        sum_response[offset: offset + null_idx]
+                ).decode("utf-8")
+
+            elif (data_symbols[data_name].dataType == ADST_WSTRING):
+                ret = sum_response[
+                      offset: offset+ data_symbols[data_name].size]
+                null_idx = FindWstringEnd(ret)
+
+                wstrings = []
+                for item in ret[:null_idx]:
+                    if item < 0:
+                        item +=256
+                    wstrings.append(item)
+
+                value = bytearray(wstrings).decode("utf_16_le")
+
+            else:
+                value =None
             result[data_name] = value
         offset += data_symbols[data_name].size
 
@@ -1090,18 +1132,25 @@ def adsSumWrite(
 
     for data_name, value in data_names_and_values.items():
         if data_name in structured_data_names:
-            buf[offset: offset + data_symbols[data_name].size] = value
-        elif data_symbols[data_name].dataType == ADST_STRING:
-            buf[offset: offset + len(value)] = value.encode("utf-8")
-        elif data_symbols[data_name].dataType == ADST_WSTRING:
-            buf[offset: offset + 2 * len(value)] = value.encode("utf-16-le")
-        else:
+            buf[offset : offset + data_symbols[data_name].size] = value
+        elif (
+            data_symbols[data_name].dataType != ADST_STRING
+            and data_symbols[data_name].dataType != ADST_WSTRING
+        ):
             struct.pack_into(
                 DATATYPE_MAP[ads_type_to_ctype[data_symbols[data_name].dataType]],
                 buf,
                 offset,
                 value,
             )
+        else:
+            value = value + '\0'
+            if data_symbols[data_name].dataType == ADST_STRING:
+                temp = value.encode("utf-8")
+                buf[offset: offset + len(temp)] = temp
+            elif data_symbols[data_name].dataType == ADST_WSTRING:
+                temp = value.encode("utf_16_le")
+                buf[offset: offset + len(temp)] = temp
         offset += data_symbols[data_name].size
 
     error_descriptions = adsSumWriteBytes(

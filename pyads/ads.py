@@ -45,6 +45,8 @@ from .constants import (
     ads_type_to_ctype,
     PLCSimpleDataType,
     PLCDataType,
+    PLCTYPE_WSTRING,
+    PLC_DEFAULT_WSTRING_SIZE,
 )
 from .pyads_ex import (
     adsAddRoute,
@@ -57,6 +59,7 @@ from .pyads_ex import (
     adsSyncSetTimeoutEx,
     adsSetLocalAddress,
     ADSError,
+    bytes2utf16,
 )
 from .structs import (
     AmsAddr,
@@ -262,6 +265,11 @@ def size_of_structure(structure_def: StructureDef) -> int:
                 num_of_bytes += (str_len + 1) * size
             else:
                 num_of_bytes += (PLC_DEFAULT_STRING_SIZE + 1) * size
+        elif plc_datatype == PLCTYPE_WSTRING:
+            if str_len is not None:
+                num_of_bytes += (str_len*2 + 2) * size
+            else:
+                num_of_bytes += (PLC_DEFAULT_WSTRING_SIZE * 2 + 2) * size
         elif plc_datatype not in DATATYPE_MAP:
             raise RuntimeError("Datatype not found")
         else:
@@ -319,6 +327,16 @@ def dict_from_bytes(
                         .decode("utf-8")
                     )
                     index += str_len + 1
+                elif plc_datatype == PLCTYPE_WSTRING:
+                    if str_len is None:
+                        str_len = PLC_DEFAULT_STRING_SIZE
+
+                    bytes_wstr = byte_list[index: (index + (str_len * 2 + 2))]
+
+                    var_array.append(
+                            bytes2utf16(bytearray(bytes_wstr))
+                    )
+                    index += str_len * 2 + 2
                 elif plc_datatype not in DATATYPE_MAP:
                     raise RuntimeError("Datatype not found. Check structure definition")
                 else:
@@ -396,6 +414,19 @@ def bytes_from_dict(
                     else:
                         byte_list += list(var.encode("utf-8"))
                         remaining_bytes = str_len + 1 - len(var)
+                    for byte in range(remaining_bytes):
+                        byte_list.append(0)
+                elif plc_datatype == PLCTYPE_WSTRING:
+                    if str_len is None:
+                        str_len = PLC_DEFAULT_WSTRING_SIZE
+
+                    if size > 1:
+                        byte_list += list(var[i].encode("utf_16_le"))
+                        remaining_bytes = str_len * 2 + 2 - len(var[i] * 2)
+                    else:
+                        byte_list += list(var.encode("utf_16_le"))
+                        remaining_bytes = str_len * 2 + 2 - len(var * 2)
+
                     for byte in range(remaining_bytes):
                         byte_list.append(0)
                 elif plc_datatype not in DATATYPE_MAP:
